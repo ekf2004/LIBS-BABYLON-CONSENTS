@@ -247,12 +247,96 @@
     background: #fee2e2;
     color: #991b1b;
   }
+  .date-badge {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 10px;
+    margin-left: 6px;
+    background: #fef3c7;
+    color: #92400e;
+    letter-spacing: 0.02em;
+    vertical-align: middle;
+  }
   .patient-row.no-doctor {
     opacity: 0.6;
     background: #fef2f2;
   }
   .patient-row.no-doctor:hover {
     background: #fee2e2;
+  }
+
+  /* Date confirmation banner */
+  .date-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+    border: 2px solid #f59e0b;
+    border-radius: 12px;
+    padding: 16px 18px;
+    margin-bottom: 16px;
+  }
+  .date-banner.multi {
+    background: linear-gradient(135deg, #fee2e2 0%, #fecaca 100%);
+    border-color: #dc2626;
+  }
+  .date-banner-icon {
+    font-size: 28px;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .date-banner-content {
+    flex: 1;
+    min-width: 0;
+  }
+  .date-banner-label {
+    font-size: 13px;
+    font-weight: 700;
+    color: #78350f;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 4px;
+  }
+  .date-banner.multi .date-banner-label {
+    color: #7f1d1d;
+  }
+  .date-banner-date-big {
+    font-size: 20px;
+    font-weight: 700;
+    color: #1f2937;
+    line-height: 1.2;
+  }
+  .date-banner-hint {
+    font-size: 12px;
+    color: #6b7280;
+    margin-top: 6px;
+  }
+  .date-banner-multi-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 4px;
+  }
+  .date-banner-multi-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 12px;
+    padding: 4px 0;
+    border-bottom: 1px solid rgba(0,0,0,0.08);
+  }
+  .date-banner-multi-row:last-child { border-bottom: none; }
+  .date-banner-date {
+    font-weight: 700;
+    color: #1f2937;
+    font-size: 15px;
+  }
+  .date-banner-count {
+    font-size: 12px;
+    color: #6b7280;
+    font-weight: 500;
   }
 
   /* Done state */
@@ -667,7 +751,10 @@ function normalizeDoctor(raw) {
 }
 
 function parseScheduleSheet(wb) {
-  const results = { date: null, doctors: [], patients: [] };
+  // results.date is kept as a fallback ("first date seen") for filename use.
+  // results.dates holds the set of distinct dates encountered across sections.
+  // Each patient now carries its OWN date so multi-day files work correctly.
+  const results = { date: null, dates: [], doctors: [], patients: [] };
 
   for (const sheetName of wb.SheetNames) {
     const sheet = wb.Sheets[sheetName];
@@ -677,10 +764,12 @@ function parseScheduleSheet(wb) {
 
     const timeRe = /^(\d{1,4}(AM|PM|am|pm)|\d{1,2}:\d{2}\s*(AM|PM)?)$/;
 
-    // Walk rows top-to-bottom, tracking the active doctor.
-    // Each patient row inherits whichever doctor was most recently declared above it.
+    // Walk rows top-to-bottom, tracking the active doctor AND active date.
+    // Each patient inherits whichever doctor and date were most recently declared above it.
     let activeDoctor = null;
+    let activeDate = null;
     const doctorsSeen = new Set();
+    const datesSeen = new Set();
 
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
@@ -700,12 +789,19 @@ function parseScheduleSheet(wb) {
         continue;
       }
 
-      // DATE row: capture the date (just use the first one — they're all the same day)
-      if (c0Upper === "DATE" && c1 !== "" && c1 !== undefined && !results.date) {
+      // DATE row: update active date for all rows that follow.
+      // Note: this can update mid-file when a new section has a different date.
+      if (c0Upper === "DATE" && c1 !== "" && c1 !== undefined) {
+        let dateStr = null;
         if (typeof c1 === "number") {
-          results.date = fmtMDY(excelSerialToDate(c1));
+          dateStr = fmtMDY(excelSerialToDate(c1));
         } else {
-          results.date = String(c1).trim();
+          dateStr = String(c1).trim();
+        }
+        if (dateStr) {
+          activeDate = dateStr;
+          datesSeen.add(dateStr);
+          if (!results.date) results.date = dateStr;  // first date = fallback for filenames
         }
         continue;
       }
@@ -736,10 +832,12 @@ function parseScheduleSheet(wb) {
         name: nameCell,
         procedureRaw: procCell,
         doctor: activeDoctor,  // attach per-patient doctor
+        date: activeDate,      // attach per-patient date
       });
     }
 
     results.doctors = Array.from(doctorsSeen);
+    results.dates = Array.from(datesSeen);
 
     // If we found patients, don't keep looking in other sheets
     if (results.patients.length > 0) break;
@@ -908,7 +1006,7 @@ function App() {
         setParseInfo(null);
       } else {
         setPatients(parsed.patients);
-        setParseInfo({ date: parsed.date, doctors: parsed.doctors });
+        setParseInfo({ date: parsed.date, dates: parsed.dates, doctors: parsed.doctors });
         setSelected(new Set());
 
         // Check if every patient has a doctor assigned
@@ -953,11 +1051,10 @@ function App() {
       const pdfDoc = await PDFLib.PDFDocument.create();
       const helveticaFont = await pdfDoc.embedFont(PDFLib.StandardFonts.Helvetica);
 
-      // Prepare the date string for stamping (MM/DD/YYYY for US convention)
-      const stampDate = formatDateForStamp(parseInfo?.date);
-
       for (const pt of validPatients) {
         const procText = renderProcedureCell(pt.procedureRaw);
+        // Use this patient's own date — handles multi-day files correctly
+        const stampDate = formatDateForStamp(pt.date || parseInfo?.date);
         await stampConsent(pdfDoc, templateBytes, pt.name, pt.doctor, procText, stampDate, helveticaFont);
       }
 
@@ -966,13 +1063,16 @@ function App() {
       const url = URL.createObjectURL(blob);
 
       const a = document.createElement("a");
-      const dateStr = formatDateForFilename(parseInfo?.date);
+      // For filename, prefer this batch's date(s). If a single date dominates, use it;
+      // otherwise fall back to first detected date.
+      const batchDates = Array.from(new Set(validPatients.map(p => p.date).filter(Boolean)));
+      const filenameDate = formatDateForFilename(batchDates.length === 1 ? batchDates[0] : parseInfo?.date);
       // Filename: list all doctors' last names who appear in this batch
       const docs = Array.from(new Set(validPatients.map(p => p.doctor.split(" ").pop())));
       const physShort = docs.join("_");
       const suffix = mode === "selected" ? `_AddOn_${validPatients.length}pt` : "";
       a.href = url;
-      a.download = `Babylon_Consents_${physShort}_${dateStr}${suffix}.pdf`;
+      a.download = `Babylon_Consents_${physShort}_${filenameDate}${suffix}.pdf`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -1032,19 +1132,40 @@ function App() {
   const validCount = patients.filter(p => p.doctor).length;
   const canGenerate = hasPatients && validCount > 0 && !busy;
 
-  // Format detected date nicely for display
-  const displayDate = useMemo(() => {
-    if (!parseInfo?.date) return null;
+  // Format detected dates nicely for display
+  // For multi-date files, returns an array of formatted dates with weekdays.
+  // For single-date files, returns a single formatted string.
+  const formatOneDate = (dateStr) => {
+    if (!dateStr) return null;
     try {
-      const parts = parseInfo.date.split(/[\/\-]/);
+      const parts = dateStr.split(/[\/\-]/);
       if (parts.length === 3) {
         const [m, d, y] = parts.map(Number);
         const yr = y < 100 ? 2000 + y : y;
         return new Date(yr, m-1, d).toLocaleDateString("en-US", { weekday:"long", month:"long", day:"numeric", year:"numeric" });
       }
     } catch {}
-    return parseInfo.date;
+    return dateStr;
+  };
+
+  const displayDates = useMemo(() => {
+    const list = parseInfo?.dates && parseInfo.dates.length
+      ? parseInfo.dates
+      : (parseInfo?.date ? [parseInfo.date] : []);
+    return list.map(d => ({ raw: d, formatted: formatOneDate(d) }));
   }, [parseInfo]);
+
+  // Per-patient date counts so we can show which date each section is using
+  const dateCounts = useMemo(() => {
+    const counts = {};
+    for (const p of patients) {
+      const key = p.date || "(no date)";
+      counts[key] = (counts[key] || 0) + 1;
+    }
+    return counts;
+  }, [patients]);
+
+  const hasMultipleDates = displayDates.length > 1;
 
   return (
     <div className="container"
@@ -1081,6 +1202,37 @@ function App() {
 
       {hasPatients && !done && (
         <>
+          {/* Prominent date confirmation banner — forces verification before generating */}
+          {displayDates.length > 0 && (
+            <div className={"date-banner" + (hasMultipleDates ? " multi" : "")}>
+              <div className="date-banner-icon">📅</div>
+              <div className="date-banner-content">
+                <div className="date-banner-label">
+                  {hasMultipleDates ? "Multiple dates detected — verify each:" : "Date detected:"}
+                </div>
+                {hasMultipleDates ? (
+                  <div className="date-banner-multi-list">
+                    {displayDates.map(d => (
+                      <div key={d.raw} className="date-banner-multi-row">
+                        <span className="date-banner-date">{d.formatted}</span>
+                        <span className="date-banner-count">
+                          {dateCounts[d.raw] || 0} patient{(dateCounts[d.raw] || 0) === 1 ? "" : "s"}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="date-banner-date-big">{displayDates[0].formatted}</div>
+                )}
+                <div className="date-banner-hint">
+                  {hasMultipleDates
+                    ? "Each consent uses the date from its section in the Excel."
+                    : "If this is wrong, fix the DATE row in your Excel and reload."}
+                </div>
+              </div>
+            </div>
+          )}
+
           <div className="summary-card">
             <div className="summary-row">
               <div className="summary-label">Patients</div>
@@ -1103,12 +1255,6 @@ function App() {
                 )}
               </div>
             </div>
-            {displayDate && (
-              <div className="summary-row">
-                <div className="summary-label">Date</div>
-                <div className="summary-value">{displayDate}</div>
-              </div>
-            )}
           </div>
 
           <div className="action-row">
@@ -1153,6 +1299,9 @@ function App() {
                       </span>
                     )}
                     {!p.doctor && <span className="doc-badge missing">no doctor</span>}
+                    {hasMultipleDates && p.date && (
+                      <span className="date-badge">{p.date}</span>
+                    )}
                   </div>
                   <div className="patient-proc">{p.renderedProc || <em style={{color:"#dc2626"}}>[could not parse — consent will show raw text]</em>}</div>
                 </div>
