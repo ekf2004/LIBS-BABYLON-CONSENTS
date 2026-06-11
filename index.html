@@ -1150,7 +1150,7 @@ function drawWhiteRect(page, r) {
 // === Per-form page appenders ===========================================
 // Each appender copies the template page(s) into the combined output doc
 // and stamps the patient onto the copy. This way Stacy gets three printable
-// PDFs (Consents, Billing, ChartDocs) instead of a per-patient zip.
+// PDFs (Consents, Billing, Discharge, Driver) instead of a per-patient zip.
 
 async function appendConsentPage(doc, tplBytes, patient, font) {
   const tpl = await PDFLib.PDFDocument.load(tplBytes);
@@ -1213,8 +1213,8 @@ async function appendDriverPage(doc, tplBytes, patient, font) {
   drawLabelBlock(page, STAMP_COORDS.driver.labelBlock, patient, font);
 }
 
-// === Three combined PDFs in one pass ===================================
-// Returns { consents, billing, chartDocs } — three Uint8Arrays Stacy can
+// === Five combined PDFs in one pass ====================================
+// Returns { consents, billing, discharge, driver, labels } — Uint8Arrays Stacy can
 // Avery 5160 labels: 3 columns × 10 rows = 30 labels per sheet.
 // One patient per column (10 copies each), so each sheet holds 3 patients.
 // Last sheet leaves unused columns blank if patient count isn't a multiple of 3.
@@ -1268,15 +1268,17 @@ async function generateLabelsSheet(patients) {
 }
 
 
-// print individually. ChartDocs.pdf includes discharge×2 + driver per
-// patient so a single print job gives her both discharge copies.
+// print individually. Discharge and driver are split into their own PDFs so
+// Stacy can print each on its own paper/tray if she wants.
 async function generateChartPacket(patients) {
   const consents  = await PDFLib.PDFDocument.create();
   const billing   = await PDFLib.PDFDocument.create();
-  const chartDocs = await PDFLib.PDFDocument.create();
+  const discharge = await PDFLib.PDFDocument.create();
+  const driver    = await PDFLib.PDFDocument.create();
   const cFont = await consents.embedFont(PDFLib.StandardFonts.Helvetica);
   const bFont = await billing.embedFont(PDFLib.StandardFonts.Helvetica);
-  const dFont = await chartDocs.embedFont(PDFLib.StandardFonts.Helvetica);
+  const disFont = await discharge.embedFont(PDFLib.StandardFonts.Helvetica);
+  const drvFont = await driver.embedFont(PDFLib.StandardFonts.Helvetica);
 
   const consentTpl  = base64ToBytes(document.getElementById("consent-template-b64").textContent.trim());
   const fanBillTpl  = base64ToBytes(document.getElementById("fanaee-billing-b64").textContent.trim());
@@ -1291,16 +1293,17 @@ async function generateChartPacket(patients) {
     const disTpl  = isFanaee ? fanDisTpl  : kongDisTpl;
     await appendConsentPage(consents,  consentTpl, p, cFont);
     await appendBillingPages(billing,  billTpl,    p, bFont);
-    // Discharge twice (patient copy + chart copy) then driver.
-    await appendDischargePages(chartDocs, disTpl,  p, dFont);
-    await appendDischargePages(chartDocs, disTpl,  p, dFont);
-    await appendDriverPage(chartDocs,     driverTpl, p, dFont);
+    // Discharge twice (patient copy + chart copy) preserved from v10.
+    await appendDischargePages(discharge, disTpl,  p, disFont);
+    await appendDischargePages(discharge, disTpl,  p, disFont);
+    await appendDriverPage(driver,        driverTpl, p, drvFont);
   }
   const labels = await generateLabelsSheet(patients);
   return {
     consents:  await consents.save(),
     billing:   await billing.save(),
-    chartDocs: await chartDocs.save(),
+    discharge: await discharge.save(),
+    driver:    await driver.save(),
     labels,
   };
 }
@@ -1412,13 +1415,14 @@ function App() {
     setBusy(true);
     setError(null);
     try {
-      const { consents, billing, chartDocs, labels } = await generateChartPacket(validPatients);
+      const { consents, billing, discharge, driver, labels } = await generateChartPacket(validPatients);
       const batchDates = Array.from(new Set(validPatients.map(p => p.date).filter(Boolean)));
       const dateSuffix = formatDateForFilename(batchDates.length === 1 ? batchDates[0] : parseInfo?.date);
       const files = {
         consents:  { bytes: consents,  filename: `Babylon_Consents_${dateSuffix}.pdf`  },
         billing:   { bytes: billing,   filename: `Babylon_Billing_${dateSuffix}.pdf`   },
-        chartDocs: { bytes: chartDocs, filename: `Babylon_ChartDocs_${dateSuffix}.pdf` },
+        discharge: { bytes: discharge, filename: `Babylon_Discharge_${dateSuffix}.pdf` },
+        driver:    { bytes: driver,    filename: `Babylon_Driver_${dateSuffix}.pdf`    },
         labels:    { bytes: labels,    filename: `Babylon_Labels_${dateSuffix}.pdf`    },
       };
       setGenerated(files);
@@ -1431,7 +1435,9 @@ function App() {
       await sleep(600);
       downloadPdf(files.billing.bytes,   files.billing.filename);
       await sleep(600);
-      downloadPdf(files.chartDocs.bytes, files.chartDocs.filename);
+      downloadPdf(files.discharge.bytes, files.discharge.filename);
+      await sleep(600);
+      downloadPdf(files.driver.bytes,    files.driver.filename);
       await sleep(600);
       downloadPdf(files.labels.bytes,    files.labels.filename);
       setDone(true);
@@ -1624,7 +1630,7 @@ function App() {
               : `📦  Generate Consents and Chart Packet — ${packetCount} patient${packetCount === 1 ? "" : "s"}`}
           </button>
           <div style={{fontSize:12, color:"#64748b", marginTop:6}}>
-            Downloads three PDFs: Consents, Billing, and ChartDocs (discharge + driver). Your browser may ask once to allow multiple downloads — say yes.
+            Downloads five PDFs: Consents, Billing, Discharge, Driver, and Avery Labels. Your browser may ask once to allow multiple downloads — say yes.
           </div>
           {missingDobCount > 0 && (
             <div style={{fontSize:12, color:"#b45309", marginTop:6}}>
@@ -1669,7 +1675,7 @@ function App() {
           <div className="done-check">✓</div>
           <div className="done-title">Chart packet ready</div>
           <div className="done-sub">
-            4 PDFs should be in your Downloads folder. If any are missing
+            5 PDFs should be in your Downloads folder. If any are missing
             (the browser sometimes blocks later auto-downloads), click below
             to grab them manually.
           </div>
@@ -1692,9 +1698,16 @@ function App() {
               <button
                 className="big-btn packet-action"
                 style={{maxWidth:360}}
-                onClick={() => downloadPdf(generated.chartDocs.bytes, generated.chartDocs.filename)}
+                onClick={() => downloadPdf(generated.discharge.bytes, generated.discharge.filename)}
               >
-                ⬇ Download Chart Docs PDF
+                ⬇ Download Discharge PDF
+              </button>
+              <button
+                className="big-btn packet-action"
+                style={{maxWidth:360}}
+                onClick={() => downloadPdf(generated.driver.bytes, generated.driver.filename)}
+              >
+                ⬇ Download Driver PDF
               </button>
               <button
                 className="big-btn packet-action"
